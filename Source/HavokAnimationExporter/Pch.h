@@ -44,6 +44,8 @@
 
 #ifdef _550
 #include <Common/Serialize/Packfile/Binary/hkBinaryPackfileReader.h>
+#include <Animation/Animation/Motion/Default/hkaDefaultAnimatedReferenceFrame.h>
+#include <Animation/Animation/Motion/hkaAnimatedReferenceFrameUtils.h>
 #endif
 
 #include <Common/Serialize/Packfile/Binary/hkBinaryPackfileWriter.h>

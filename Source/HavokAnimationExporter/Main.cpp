@@ -311,6 +311,11 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
     hkArray<hkQsTransform> localTransforms(nodes.getSize() * (int)lFrameCount);
     hkArray<hkQsTransform> modelTransforms(nodes.getSize());
 
+#ifdef _550
+    hkArray<hkQsTransform> rootModelTransforms;
+    rootModelTransforms.setSize(lFrameCount);
+#endif
+
     hkaSkeletonUtils::transformLocalPoseToModelPose(nodes.getSize(), &skeleton->m_parentIndices[0], &skeleton->m_referencePose[0], &modelTransforms[0]);
 
     for (FbxLongLong i = 0; i < lFrameCount; i++)
@@ -322,6 +327,10 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
             if (nodes[j] != nullptr)
                 modelTransforms[j] = toHavok(nodes[j]->EvaluateGlobalTransform(lTime));
         }
+
+#ifdef _550
+        rootModelTransforms[(int)i] = modelTransforms[0];
+#endif
 
         hkaSkeletonUtils::transformModelPoseToLocalPose(nodes.getSize(), &skeleton->m_parentIndices[0], &modelTransforms[0], &localTransforms[(int)i * nodes.getSize()]);
     }
@@ -352,6 +361,37 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
     animation->m_transforms = std::move(localTransforms);
 #elif _550
     toPtrArray(localTransforms, animation->m_transforms, animation->m_numTransforms);
+#endif
+
+#ifdef _550
+    hkReal totalDistance = 0.0f;
+    for (int i = 1; i < lFrameCount; i++)
+    {
+        hkVector4 delta = rootModelTransforms[i].m_translation;
+        delta.sub4(rootModelTransforms[i - 1].m_translation);
+        totalDistance += delta.length3();
+    }
+    if (totalDistance > 0.01f)
+    {
+        hkaDefaultAnimatedReferenceFrame::MotionExtractionOptions options;
+            options.m_referenceFrameTransforms = &rootModelTransforms[0];
+            options.m_numReferenceFrameTransforms = lFrameCount;
+            options.m_referenceFrameDuration = (hkReal)lSecondDouble;
+            options.m_numSamples = lFrameCount;
+            options.m_allowUpDown = false;
+            options.m_allowFrontBack = true;
+            options.m_allowRightLeft = false;
+            options.m_allowTurning = false;
+            options.m_up = hkVector4(0.0f, 1.0f, 0.0f, 0.0f);
+            options.m_forward = hkVector4(0.0f, 0.0f, 1.0f, 0.0f);
+            hkaDefaultAnimatedReferenceFrame* referenceFrame = new hkaDefaultAnimatedReferenceFrame(options);
+            for (int i = 0; i < referenceFrame->m_numReferenceFrameSamples; i++)
+            {
+                referenceFrame->m_referenceFrameSamples[i](2) = -referenceFrame->m_referenceFrameSamples[i](2);
+            }
+            animation->setExtractedMotion(referenceFrame);
+            hkaAnimatedReferenceFrameUtils::transformIntoAnimatedReferenceFrame(referenceFrame, &localTransforms[0], lFrameCount, nodes.getSize());
+    }
 #endif
 
 #if _2010 || _2012
