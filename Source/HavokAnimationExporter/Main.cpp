@@ -38,6 +38,105 @@ static hkQsTransform toHavok(const FbxAMatrix& v)
     return hkQsTransform(toHavok(v.GetT()), toHavok(v.GetQ()), toHavok(v.GetS()));
 }
 
+#ifdef _550
+static FbxNode* findNodeByNameCaseInsensitive(FbxNode* node, const char* name)
+{
+    if (node == nullptr || name == nullptr)
+        return nullptr;
+
+    if (_stricmp(node->GetName(), name) == 0)
+        return node;
+
+    for (int i = 0; i < node->GetChildCount(); i++)
+    {
+        FbxNode* found = findNodeByNameCaseInsensitive(node->GetChild(i), name);
+        if (found != nullptr)
+            return found;
+    }
+
+    return nullptr;
+}
+
+static FbxNode* findNodeByNameCaseInsensitive(FbxScene* scene, const char* name)
+{
+    if (scene == nullptr || name == nullptr)
+        return nullptr;
+
+    FbxNode* exact = scene->FindNodeByName(name);
+    if (exact != nullptr)
+        return exact;
+
+    return findNodeByNameCaseInsensitive(scene->GetRootNode(), name);
+}
+
+static FbxNode* detectRootMotionNode(FbxScene* scene, const hkArray<FbxNode*>& nodes, int rootTrackIndex)
+{
+    const char* preferredArmatureChildren[] = { "Reference", "Root", "Hips" };
+    for (const char* childName : preferredArmatureChildren)
+    {
+        FbxNode* child = findNodeByNameCaseInsensitive(scene, childName);
+        if (child != nullptr && child->GetParent() != nullptr)
+            return child->GetParent();
+    }
+
+    if (rootTrackIndex >= 0 && rootTrackIndex < nodes.getSize() &&
+        nodes[rootTrackIndex] != nullptr && nodes[rootTrackIndex]->GetParent() != nullptr)
+    {
+        return nodes[rootTrackIndex]->GetParent();
+    }
+
+    return nullptr;
+}
+
+static const hkaAnimatedReferenceFrame* buildExtractedMotionFromArmatureNode(
+    FbxNode* rootMotionNode, const FbxTimeSpan& timeSpan, double durationSeconds, FbxLongLong frameCount)
+{
+    if (rootMotionNode == nullptr || frameCount <= 0)
+        return nullptr;
+
+    hkArray<hkVector4> sampleArray((int)frameCount);
+    bool hasMotion = false;
+    for (FbxLongLong i = 0; i < frameCount; i++)
+    {
+        const FbxTime time = timeSpan.GetStart() + FbxTimeSeconds((double)i / (double)(frameCount - 1) * durationSeconds);
+        const FbxAMatrix rootMotionMatrix = rootMotionNode->EvaluateLocalTransform(time);
+
+        FbxVector4 rootMotionVector4 = rootMotionMatrix.GetT();
+        rootMotionVector4[0] *= -1.0;
+        rootMotionVector4[1] *= -1.0;
+        rootMotionVector4[2] *= -1.0;
+
+        const FbxVector4 rootRotationVector4 = rootMotionMatrix.GetR();
+        rootMotionVector4[3] = rootRotationVector4[2] / 56.65;
+
+        sampleArray[(int)i] = toHavok(rootMotionVector4);
+
+        if (i > 0)
+        {
+            hkVector4 delta;
+            delta.setSub4(sampleArray[(int)i], sampleArray[(int)i - 1]);
+
+            hkReal yawDelta = delta(3);
+            if (yawDelta < 0.0f)
+                yawDelta = -yawDelta;
+
+            if (delta.lengthSquared3() > 1e-8f || yawDelta > 1e-6f)
+                hasMotion = true;
+        }
+    }
+
+    if (!hasMotion)
+        return nullptr;
+
+    hkaDefaultAnimatedReferenceFrame* refFrame = new hkaDefaultAnimatedReferenceFrame(hkFinishLoadedObjectFlag());
+    refFrame->m_forward = hkVector4(0.0f, 0.0f, 1.0f);
+    refFrame->m_up = hkVector4(0.0f, 1.0f, 0.0f);
+    refFrame->m_duration = (hkReal)durationSeconds;
+    toPtrArray(sampleArray, refFrame->m_referenceFrameSamples, refFrame->m_numReferenceFrameSamples);
+    return refFrame;
+}
+#endif
+
 static bool checkIsSkeleton(FbxNode* pNode)
 {
     FbxNodeAttribute* lAttribute = pNode->GetNodeAttribute();
@@ -310,10 +409,18 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
 
     hkArray<hkQsTransform> localTransforms(nodes.getSize() * (int)lFrameCount);
     hkArray<hkQsTransform> modelTransforms(nodes.getSize());
-
 #ifdef _550
-    hkArray<hkQsTransform> rootModelTransforms;
-    rootModelTransforms.setSize(lFrameCount);
+    const hkaAnimatedReferenceFrame* extractedMotion = nullptr;
+    int rootTrackIndex = 0;
+    for (int i = 0; i < skeleton->m_numParentIndices && i < nodes.getSize(); i++)
+    {
+        if (skeleton->m_parentIndices[i] < 0)
+        {
+            rootTrackIndex = i;
+            break;
+        }
+    }
+    FbxNode* rootMotionNode = detectRootMotionNode(pScene, nodes, rootTrackIndex);
 #endif
 
     hkaSkeletonUtils::transformLocalPoseToModelPose(nodes.getSize(), &skeleton->m_parentIndices[0], &skeleton->m_referencePose[0], &modelTransforms[0]);
@@ -328,12 +435,12 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
                 modelTransforms[j] = toHavok(nodes[j]->EvaluateGlobalTransform(lTime));
         }
 
-#ifdef _550
-        rootModelTransforms[(int)i] = modelTransforms[0];
-#endif
-
         hkaSkeletonUtils::transformModelPoseToLocalPose(nodes.getSize(), &skeleton->m_parentIndices[0], &modelTransforms[0], &localTransforms[(int)i * nodes.getSize()]);
     }
+
+#ifdef _550
+    extractedMotion = buildExtractedMotionFromArmatureNode(rootMotionNode, lTimeSpan, lSecondDouble, lFrameCount);
+#endif
 
     // Unroll quaternions so spline compression doesn't flicker.
     for (FbxLongLong i = 0; i < lFrameCount; i++)
@@ -363,46 +470,30 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
     toPtrArray(localTransforms, animation->m_transforms, animation->m_numTransforms);
 #endif
 
-#ifdef _550
-    hkReal totalDistance = 0.0f;
-    for (int i = 1; i < lFrameCount; i++)
-    {
-        hkVector4 delta = rootModelTransforms[i].m_translation;
-        delta.sub4(rootModelTransforms[i - 1].m_translation);
-        totalDistance += delta.length3();
-    }
-    if (totalDistance > 0.01f)
-    {
-        hkaDefaultAnimatedReferenceFrame::MotionExtractionOptions options;
-            options.m_referenceFrameTransforms = &rootModelTransforms[0];
-            options.m_numReferenceFrameTransforms = lFrameCount;
-            options.m_referenceFrameDuration = (hkReal)lSecondDouble;
-            options.m_numSamples = lFrameCount;
-            options.m_allowUpDown = false;
-            options.m_allowFrontBack = true;
-            options.m_allowRightLeft = false;
-            options.m_allowTurning = false;
-            options.m_up = hkVector4(0.0f, 1.0f, 0.0f, 0.0f);
-            options.m_forward = hkVector4(0.0f, 0.0f, 1.0f, 0.0f);
-            hkaDefaultAnimatedReferenceFrame* referenceFrame = new hkaDefaultAnimatedReferenceFrame(options);
-            for (int i = 0; i < referenceFrame->m_numReferenceFrameSamples; i++)
-            {
-                referenceFrame->m_referenceFrameSamples[i](2) = -referenceFrame->m_referenceFrameSamples[i](2);
-            }
-            animation->setExtractedMotion(referenceFrame);
-            hkaAnimatedReferenceFrameUtils::transformIntoAnimatedReferenceFrame(referenceFrame, &localTransforms[0], lFrameCount, nodes.getSize());
-    }
-#endif
-
 #if _2010 || _2012
     animationBinding->m_originalSkeletonName = originalSkeletonName;
 #endif
 
     SplineCompressedAnimation::TrackCompressionParams params;
     params.m_rotationTolerance = 0.00001f; // Default value makes it very lossy, so set it to a lower value.
-
-    animationBinding->m_animation = compress ? new SplineCompressedAnimation(*animation,
-        params, SplineCompressedAnimation::AnimationCompressionParams()) : (Animation*)animation;
+    if (compress)
+    {
+        SplineCompressedAnimation* compressedAnimation = new SplineCompressedAnimation(
+            *animation, params, SplineCompressedAnimation::AnimationCompressionParams());
+#ifdef _550
+        if (extractedMotion != nullptr)
+            compressedAnimation->setExtractedMotion(extractedMotion);
+#endif
+        animationBinding->m_animation = compressedAnimation;
+    }
+    else
+    {
+#ifdef _550
+        if (extractedMotion != nullptr)
+            animation->setExtractedMotion(extractedMotion);
+#endif
+        animationBinding->m_animation = (Animation*)animation;
+    }
 
     return animationBinding;
 }

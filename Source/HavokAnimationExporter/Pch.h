@@ -44,8 +44,6 @@
 
 #ifdef _550
 #include <Common/Serialize/Packfile/Binary/hkBinaryPackfileReader.h>
-#include <Animation/Animation/Motion/Default/hkaDefaultAnimatedReferenceFrame.h>
-#include <Animation/Animation/Motion/hkaAnimatedReferenceFrameUtils.h>
 #endif
 
 #include <Common/Serialize/Packfile/Binary/hkBinaryPackfileWriter.h>
@@ -57,6 +55,7 @@
 #include <Animation/Animation/Animation/hkaAnimationBinding.h>
 #include <Animation/Animation/Rig/hkaSkeleton.h>
 #include <Animation/Animation/Rig/hkaSkeletonUtils.h>
+#include <Animation/Animation/Motion/Default/hkaDefaultAnimatedReferenceFrame.h>
 
 #if _2010 || _2012
 #include <Common/Serialize/Util/hkSerializeUtil.h>
