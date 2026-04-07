@@ -3,7 +3,42 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include <cstddef>
+#include <cstdio>
 #include <list>
+#pragma once
+
+namespace HAE {
+    class File {
+        FILE* fp;
+    public:
+        File(const std::string& filename, const char* mode) : fp(fopen(filename.c_str(), mode)) {}
+        ~File() { if (fp) fclose(fp); }
+        bool valid() const { return fp != nullptr; }
+        size_t read(void* dest, size_t sz)   { return fread(dest, 1, sz, fp); }
+        void   seek(long offset, int origin) { fseek(fp, offset, origin); }
+        size_t getCurrentAddress()           { return (size_t)ftell(fp); }
+        void   goToAddress(size_t address)   { fseek(fp, (long)address, SEEK_SET); }
+        size_t getFileSize() {
+            size_t cur = getCurrentAddress();
+            fseek(fp, 0, SEEK_END);
+            size_t sz = (size_t)ftell(fp);
+            goToAddress(cur);
+            return sz;
+        }
+        size_t fixPaddingRead(size_t multiple = 4) {
+            size_t address = getCurrentAddress();
+            size_t extra   = multiple - (address % multiple);
+            if (extra == multiple) return 0;
+            goToAddress(address + extra);
+            return extra;
+        }
+    };
+
+    std::vector<unsigned char> endianSwapHKX(File* file);
+    bool endianSwapHKXToFile(const std::string& inputPath, const std::string& outputPath);
+    bool endianSwapHKXInPlace(const std::string& path);
+}
 
 #include <fbxsdk.h>
 

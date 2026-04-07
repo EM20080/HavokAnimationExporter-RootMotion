@@ -248,8 +248,6 @@ static hkaSkeleton* createSkeleton(FbxNode* pNode, const char* name)
 #endif
 }
 
-extern std::vector<unsigned char> endianSwapHKX(const void* data, size_t dataSize);
-
 static hkaSkeleton* loadSkeleton(const char* filePath)
 {
 #if _2010 || _2012
@@ -261,17 +259,12 @@ static hkaSkeleton* loadSkeleton(const char* filePath)
 
     hkRootLevelContainer* levelContainer = resource->getContents<hkRootLevelContainer>();
 #elif _550
-    FILE* file = fopen(filePath, "rb");
-    if (file == nullptr)
+    HAE::File file(filePath, "rb");
+    if (!file.valid())
         return nullptr;
 
-    fseek(file, 0, SEEK_END);
-    long fileSize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    std::vector<uint8_t> data(fileSize);
-    fread(data.data(), 1, fileSize, file);
-    fclose(file);
+    std::vector<uint8_t> data(file.getFileSize());
+    file.read(data.data(), data.size());
 
     hkBinaryPackfileReader* reader = new hkBinaryPackfileReader();
 
@@ -279,7 +272,10 @@ static hkaSkeleton* loadSkeleton(const char* filePath)
         return nullptr;
 
     if (memcmp(reader->getFileHeader().m_layoutRules, &hkStructureLayout::HostLayoutRules, sizeof(hkStructureLayout::HostLayoutRules)) != 0)
-        data = endianSwapHKX(data.data(), data.size());
+    {
+        file.goToAddress(0);
+        data = HAE::endianSwapHKX(&file);
+    }
 
     if (reader->loadEntireFile(hkIstream(data.data(), data.size()).getStreamReader()) != HK_SUCCESS)
         return nullptr;
@@ -475,14 +471,50 @@ static hkaAnimationBinding* createAnimationAndBinding(FbxScene* pScene, hkaSkele
 #endif
 
     SplineCompressedAnimation::TrackCompressionParams params;
-    params.m_rotationTolerance = 0.00001f; // Default value makes it very lossy, so set it to a lower value.
+    params.m_rotationTolerance = 0.00001f;
     if (compress)
     {
-        SplineCompressedAnimation* compressedAnimation = new SplineCompressedAnimation(
-            *animation, params, SplineCompressedAnimation::AnimationCompressionParams());
 #ifdef _550
+        int baseFrames = (animation->m_numberOfTransformTracks > 0 && animation->m_numTransforms > 0)
+            ? animation->m_numTransforms / animation->m_numberOfTransformTracks
+            : 1;
+        int splineFrameCount = (baseFrames == 13 || baseFrames == 16 || baseFrames == 21)
+            ? baseFrames + 1
+            : baseFrames;
+
+        InterleavedUncompressedAnimation* splineSource = animation;
+        if (splineFrameCount != baseFrames)
+        {
+            splineSource = new InterleavedUncompressedAnimation();
+            splineSource->m_duration = animation->m_duration;
+            splineSource->m_numberOfTransformTracks = animation->m_numberOfTransformTracks;
+            splineSource->m_numberOfFloatTracks = animation->m_numberOfFloatTracks;
+            splineSource->m_numAnnotationTracks = animation->m_numAnnotationTracks;
+            splineSource->m_annotationTracks = animation->m_annotationTracks;
+
+            const int numTracks = animation->m_numberOfTransformTracks;
+            hkQsTransform* newTransforms = new hkQsTransform[splineFrameCount * numTracks];
+            for (int f = 0; f < splineFrameCount; ++f)
+            {
+                const hkReal t = splineFrameCount <= 1
+                    ? hkReal(0)
+                    : animation->m_duration * (hkReal(f) / hkReal(splineFrameCount - 1));
+                animation->sampleTracks(t, newTransforms + f * numTracks, HK_NULL, HK_NULL);
+            }
+            splineSource->m_transforms = newTransforms;
+            splineSource->m_numTransforms = splineFrameCount * numTracks;
+        }
+
+        SplineCompressedAnimation* compressedAnimation = new SplineCompressedAnimation(
+            *splineSource, params, SplineCompressedAnimation::AnimationCompressionParams());
+        compressedAnimation->m_numAnnotationTracks = animation->m_numAnnotationTracks;
+        compressedAnimation->m_annotationTracks = animation->m_annotationTracks;
+        compressedAnimation->m_numberOfFloatTracks = animation->m_numberOfFloatTracks;
         if (extractedMotion != nullptr)
             compressedAnimation->setExtractedMotion(extractedMotion);
+#else
+        SplineCompressedAnimation* compressedAnimation = new SplineCompressedAnimation(
+            *animation, params, SplineCompressedAnimation::AnimationCompressionParams());
 #endif
         animationBinding->m_animation = compressedAnimation;
     }
